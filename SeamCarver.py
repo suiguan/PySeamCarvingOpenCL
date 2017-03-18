@@ -5,10 +5,10 @@ import time
 
 class SeamCarver:
    def __init__(self, img): #assume the image is RGB mode
-      self.img = img
-      self.reset()
+      self.reset(img)
 
-   def reset(self):
+   def reset(self, img):
+      self.img = img
       self.width, self.height = self.img.size
       r, g, b = self.img.split()
       self.r = r.load()
@@ -109,12 +109,9 @@ class SeamCarver:
       if len(vseam) != self.height:
          print("invalid seam length %d, height %d" % (len(vseam), self.height))
          return
-      p = self.img.load()
-      for y in range(0, self.height):
-         x= vseam[y]
-         del p[x,y]
-      self.img.size = (self.width - 1, self.height)
-      self.reset()
+      img_ar = np.array(self.img)
+      new_img_ar = np.array([np.delete(img_ar[y], vseam[y], axis=0) for y in range(0, self.height)])
+      self.reset(Image.fromarray(new_img_ar))
 
    def dumpImg(self, name):
       self.img.save(name, "JPEG")
@@ -132,18 +129,21 @@ def main(argv):
    img = Image.open(argv[1])
    w,h = img.size
    new_w = w/2
-   carver = SeamCarver(img)
 
+   #regular resizing
    img.resize((new_w, h), Image.BILINEAR).save("bilinear_resize_%dx%d.jpg" % (new_w, h), "JPEG") 
-   for i in range(0, w/2):
+
+   #seam carving resizing
+   carver = SeamCarver(img)
+   for i in range(0, new_w):
       print("iteration = %d, new_w = %d" % (i, new_w))
       before = int(time.time())
       vseam = carver.findVerticalSeam()
       afterFindSeam = int(time.time())
-      print("Take %d seconds to find seam" % (afterFindSeam - before))
+      #print("Take %d seconds to find seam" % (afterFindSeam - before))
       carver.removeVerticalSeam(vseam)
       afterRemoveSeam = int(time.time())
-      print("Take %d seconds to remove seam" % (afterRemoveSeam - afterFindSeam))
+      #print("Take %d seconds to remove seam" % (afterRemoveSeam - afterFindSeam))
 
    carver.dumpImg("out.jpg")
 
