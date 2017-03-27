@@ -3,6 +3,17 @@ import numpy as np
 import sys
 import time
 
+def get_min(ar):
+   m = ar[0]
+   i = 0
+   idx = 1
+   for a in ar[1:]:
+      if a < m:
+         m = a
+	 i = idx
+      idx += 1
+   return (m, i)
+
 class SeamCarver:
    def __init__(self, img): #assume the image is RGB mode
       self.reset(img)
@@ -10,6 +21,7 @@ class SeamCarver:
    def reset(self, img):
       self.img = img
       self.width, self.height = self.img.size
+      self.img_p = self.img.load()
       r, g, b = self.img.split()
       self.r = r.load()
       self.g = g.load()
@@ -37,70 +49,48 @@ class SeamCarver:
       return x_energy + y_energy
 
    def getEnergyMap(self):
-      self.energy = [] 
+      energy = np.zeros((self.height, self.width), dtype=np.uint32) 
       for y in range(0, self.height):
          for x in range(0, self.width):
-            self.energy.append(self.getDualGradientEnergy(x,y))
+            energy[y][x] = self.getDualGradientEnergy(x,y)
+      return energy
 
-   def getEnergy(self, x, y):
-      return self.energy[x+(y*self.width)]
-
-   def setEnergy(self, x, y, v):
-      self.energy[x+(y*self.width)] = v
-
-   #return a length height array of the pixel x-index of the vertical seam
+   #return a length of height array of the pixel x-index of the vertical seam
    def findVerticalSeam(self):
       before = int(time.time())
-      self.getEnergyMap()
+      energy_map_ar = self.getEnergyMap()
       after = int(time.time())
       #print("Take %d seconds to build energy map" % (after-before))
-      findMin = False
-      minEn = sys.maxint
-      bottom_x = 0
+
+      cumulated_energy = np.zeros(energy_map_ar.shape[:2], dtype=np.uint32)
+      paths = np.zeros(energy_map_ar.shape[:2], dtype=np.uint32)
       for y in range(0, self.height):
          for x in range(0, self.width):
-            if y > 0:
-               if not findMin and y == self.height - 1: findMin = True
-               if x - 1 < 0:
-                  en = self.getEnergy(x,y) + min(self.getEnergy(x,y-1), self.getEnergy(x+1,y-1))
-               elif x + 1 >= self.width:
-                  en = self.getEnergy(x,y) + min(self.getEnergy(x-1,y-1), self.getEnergy(x,y-1))
+            if y == 0:
+               cumulated_energy[y][x] = energy_map_ar[y][x]
+               paths[y][x] = 0 #unused
+            else:
+               if x == 0:
+		  (m, i) = get_min(cumulated_energy[y-1][x:x+2])
+                  cumulated_energy[y][x] = energy_map_ar[y][x] + m 
+                  paths[y][x] = x + i 
+               elif x == self.width - 1:
+		  (m, i) = get_min(cumulated_energy[y-1][x-1:x+1])
+                  cumulated_energy[y][x] = energy_map_ar[y][x] + m 
+                  paths[y][x] = x - 1 + i 
                else:
-                  en = self.getEnergy(x,y) + min(self.getEnergy(x-1,y-1), self.getEnergy(x,y-1), self.getEnergy(x+1,y-1))
-               self.setEnergy(x, y, en) #dynamic program
-               if findMin and en < minEn:
-                  minEn = en
-                  bottom_x = x 
-      return self.findVerticalSeamFromBottomX(bottom_x)
+		  (m, i) = get_min(cumulated_energy[y-1][x-1:x+2])
+                  cumulated_energy[y][x] = energy_map_ar[y][x] + m 
+                  paths[y][x] = x - 1 + i 
+      (m, bottom_x) = get_min(cumulated_energy[self.height-1])
+      return self.findVerticalSeamFromBottomX(paths, bottom_x)
 
-   def findVerticalSeamFromBottomX(self, x):
+   def findVerticalSeamFromBottomX(self, paths, x):
       seam = [x,]
-      cur_x = x
-      for y in reversed(range(0, self.height-1)):
-         if cur_x - 1 < 0:
-            min_en = min(self.getEnergy(cur_x, y), self.getEnergy(cur_x+1, y))
-            if min_en == self.getEnergy(cur_x+1,y): 
-               seam.append(cur_x+1)
-               cur_x = cur_x+1
-            else:
-	       seam.append(cur_x)
-         elif cur_x + 1 >= self.width:
-            min_en = min(self.getEnergy(cur_x-1, y), self.getEnergy(cur_x, y))
-            if min_en == self.getEnergy(cur_x-1,y): 
-               seam.append(cur_x-1)
-               cur_x = cur_x-1
-            else:
-	       seam.append(cur_x)
-         else:
-            min_en = min(self.getEnergy(cur_x-1, y), self.getEnergy(cur_x,y), self.getEnergy(cur_x+1, y))
-            if min_en == self.getEnergy(cur_x-1,y): 
-               seam.append(cur_x-1)
-               cur_x = cur_x-1
-            elif min_en == self.getEnergy(cur_x+1,y): 
-               seam.append(cur_x+1)
-               cur_x = cur_x+1
-            else: 
-	       seam.append(cur_x)
+      seam_x = x
+      for y in reversed(range(1, self.height)):
+         seam_x = paths[y][seam_x]
+         seam.append(seam_x);
       seam.reverse()
       return seam
 
@@ -136,6 +126,7 @@ def main(argv):
    #seam carving resizing
    carver = SeamCarver(img)
    for i in range(0, new_w):
+   #for i in range(0, 1):
       print("iteration = %d, new_w = %d" % (i, new_w))
       before = int(time.time())
       vseam = carver.findVerticalSeam()
@@ -145,6 +136,7 @@ def main(argv):
       afterRemoveSeam = int(time.time())
       #print("Take %d seconds to remove seam" % (afterRemoveSeam - afterFindSeam))
 
+   #save the final result
    carver.dumpImg("out.jpg")
 
 if __name__ == "__main__":
