@@ -2,6 +2,7 @@ from PIL import Image
 import numpy as np
 import sys
 import time
+import pyopencl as cl
 
 def get_min(ar):
    m = ar[0]
@@ -17,15 +18,28 @@ def get_min(ar):
 class SeamCarver:
    def __init__(self, img): #assume the image is RGB mode
       self.reset(img)
+      self.initOpenCL()
+
+   def initOpenCL(self):
+      platforms = cl.get_platforms()
+      gpus = platforms[0].get_devices(device_type=cl.device_type.GPU)
+      self.cl_ctx = cl.Context(devices=[gpus[0],])
+      self.cl_queue = cl.CommandQueue(self.cl_ctx)
+      print("using GPU from platform %s, device %s" % (platforms[0], gpus[0]))
+      f = open('kernels.cl', 'r')
+      cl_kernels = f.read()
+      f.close()
+      self.cl_prog = cl.Program(self.cl_ctx, cl_kernels).build()
+      print("successfully build OpenCL kernels")
 
    def reset(self, img):
       self.img = img
       self.width, self.height = self.img.size
       self.img_p = self.img.load()
-      r, g, b = self.img.split()
-      self.r = r.load()
-      self.g = g.load()
-      self.b = b.load()
+      self.r_img, self.g_img, self.b_img = self.img.split()
+      self.r = self.r_img.load()
+      self.g = self.g_img.load()
+      self.b = self.b_img.load()
 
    #return the dual gradient energy at given pixel
    def getDualGradientEnergy(self, x, y):
@@ -55,12 +69,27 @@ class SeamCarver:
             energy[y][x] = self.getDualGradientEnergy(x,y)
       return energy
 
+   def getEnergyMapWithCL(self):
+      energy = np.zeros((self.height, self.width), dtype=np.uint32) 
+      r_ar = np.array(self.r_img, dtype=np.uint32)
+      g_ar = np.array(self.g_img, dtype=np.uint32)
+      b_ar = np.array(self.b_img, dtype=np.uint32)
+      mf = cl.mem_flags
+      in_r = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=r_ar)
+      in_g = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=g_ar)
+      in_b = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=b_ar)
+      res = cl.Buffer(self.cl_ctx, mf.WRITE_ONLY, energy.nbytes)
+      self.cl_prog.dualGradientEnergy(self.cl_queue, energy.shape, None, in_r, in_g, in_b, res)
+      cl.enqueue_copy(self.cl_queue, energy, res)
+      return energy
+
    #return a length of height array of the pixel x-index of the vertical seam
    def findVerticalSeam(self):
-      before = int(time.time())
-      energy_map_ar = self.getEnergyMap()
-      after = int(time.time())
-      #print("Take %d seconds to build energy map" % (after-before))
+      before = time.time()
+      #energy_map_ar = self.getEnergyMap()
+      energy_map_ar = self.getEnergyMapWithCL()
+      after = time.time()
+      #print("Take %.6f seconds to build energy map" % (after-before,))
 
       cumulated_energy = np.zeros(energy_map_ar.shape[:2], dtype=np.uint32)
       paths = np.zeros(energy_map_ar.shape[:2], dtype=np.uint32)
