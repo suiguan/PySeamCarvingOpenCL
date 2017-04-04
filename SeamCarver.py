@@ -2,8 +2,13 @@ from PIL import Image
 import numpy as np
 import sys
 import time
-import pyopencl as cl
 
+#USE_OPENCL = False #serial computation
+USE_OPENCL = True #GPU parallel computation
+
+if USE_OPENCL: import pyopencl as cl
+
+#helper function to find the mimimum value & index from the input list
 def get_min(ar):
    m = ar[0]
    i = 0
@@ -18,19 +23,23 @@ def get_min(ar):
 class SeamCarver:
    def __init__(self, img): #assume the image is RGB mode
       self.reset(img)
-      self.initOpenCL()
+      if USE_OPENCL: self.initOpenCL()
 
    def initOpenCL(self):
       platforms = cl.get_platforms()
       gpus = platforms[0].get_devices(device_type=cl.device_type.GPU)
+      self.max_work_group_size = gpus[0].max_work_group_size
       self.cl_ctx = cl.Context(devices=[gpus[0],])
       self.cl_queue = cl.CommandQueue(self.cl_ctx)
-      print("using GPU from platform %s, device %s" % (platforms[0], gpus[0]))
-      f = open('kernels.cl', 'r')
+      print("using GPU from platform %s, device %s, max work group size %d" % (platforms[0], gpus[0], self.max_work_group_size))
+      self.cl_prog = self.loadCLProgramFromFile('kernels.cl') 
+      print("successfully build OpenCL kernels")
+
+   def loadCLProgramFromFile(self, fname):
+      f = open(fname, 'r')
       cl_kernels = f.read()
       f.close()
-      self.cl_prog = cl.Program(self.cl_ctx, cl_kernels).build()
-      print("successfully build OpenCL kernels")
+      return cl.Program(self.cl_ctx, cl_kernels).build()
 
    def reset(self, img):
       self.img = img
@@ -62,6 +71,7 @@ class SeamCarver:
       #return the total energy
       return x_energy + y_energy
 
+   #compute the energy map using CPU
    def getEnergyMap(self):
       energy = np.zeros((self.height, self.width), dtype=np.uint32) 
       for y in range(0, self.height):
@@ -69,6 +79,7 @@ class SeamCarver:
             energy[y][x] = self.getDualGradientEnergy(x,y)
       return energy
 
+   #compute the energy map using OpenCL 
    def getEnergyMapWithCL(self):
       energy = np.zeros((self.height, self.width), dtype=np.uint32) 
       r_ar = np.array(self.r_img, dtype=np.uint32)
@@ -86,13 +97,12 @@ class SeamCarver:
    #return a length of height array of the pixel x-index of the vertical seam
    def findVerticalSeam(self):
       before = time.time()
-      #energy_map_ar = self.getEnergyMap()
-      energy_map_ar = self.getEnergyMapWithCL()
+      energy_map_ar = self.getEnergyMap()
       after = time.time()
-      #print("Take %.6f seconds to build energy map" % (after-before,))
+      #print("findVerticalSeam: Take %.6f seconds to build energy map" % (after-before,))
 
-      cumulated_energy = np.zeros(energy_map_ar.shape[:2], dtype=np.uint32)
-      paths = np.zeros(energy_map_ar.shape[:2], dtype=np.uint32)
+      cumulated_energy = np.zeros(energy_map_ar.shape, dtype=np.uint32)
+      paths = np.zeros(energy_map_ar.shape, dtype=np.uint32)
       for y in range(0, self.height):
          for x in range(0, self.width):
             if y == 0:
@@ -114,6 +124,28 @@ class SeamCarver:
       (m, bottom_x) = get_min(cumulated_energy[self.height-1])
       return self.findVerticalSeamFromBottomX(paths, bottom_x)
 
+   #find the vertical seam using OpenCL
+   def findVerticalSeamWithOpenCL(self):
+      before = time.time()
+      energy_map_ar = self.getEnergyMapWithCL()
+      after = time.time()
+      #print("findVerticalSeamWithOpenCL: Take %.6f seconds to build energy map" % (after-before,))
+
+      cumulated_energy = np.zeros(energy_map_ar.shape, dtype=np.uint32)
+      paths = np.zeros(energy_map_ar.shape, dtype=np.uint32)
+
+      mf = cl.mem_flags
+      in_energy = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=energy_map_ar)
+      res_cumulated = cl.Buffer(self.cl_ctx, mf.READ_WRITE, energy_map_ar.nbytes)
+      res_paths = cl.Buffer(self.cl_ctx, mf.WRITE_ONLY, energy_map_ar.nbytes)
+      for h in range(0, self.height):
+         self.cl_prog.cumulateEnergyAndPath(self.cl_queue, (1, self.width), None, np.uint32(h), in_energy, res_cumulated, res_paths, global_offset=(h,0))
+      cl.enqueue_copy(self.cl_queue, cumulated_energy, res_cumulated)
+      cl.enqueue_copy(self.cl_queue, paths, res_paths)
+      (m, bottom_x) = get_min(cumulated_energy[self.height-1])
+      return self.findVerticalSeamFromBottomX(paths, bottom_x)
+
+   #from the paths array, return the vertical seam based on the given bottom x
    def findVerticalSeamFromBottomX(self, paths, x):
       seam = [x,]
       seam_x = x
@@ -132,6 +164,7 @@ class SeamCarver:
       new_img_ar = np.array([np.delete(img_ar[y], vseam[y], axis=0) for y in range(0, self.height)])
       self.reset(Image.fromarray(new_img_ar))
 
+   #save the img to a JPEG file
    def dumpImg(self, name):
       self.img.save(name, "JPEG")
 
@@ -154,19 +187,30 @@ def main(argv):
 
    #seam carving resizing
    carver = SeamCarver(img)
-   for i in range(0, new_w):
-   #for i in range(0, 1):
-      print("iteration = %d, new_w = %d" % (i, new_w))
-      before = int(time.time())
-      vseam = carver.findVerticalSeam()
-      afterFindSeam = int(time.time())
-      #print("Take %d seconds to find seam" % (afterFindSeam - before))
+   columns_to_remove = w - new_w
+
+   begin = time.time()
+   for i in range(0, columns_to_remove): #for each width that needs to be removed 
+      #1) Find the seam
+
+      #print("iteration = %d, new_w = %d" % (i, new_w))
+      before = time.time()
+      if USE_OPENCL: vseam = carver.findVerticalSeamWithOpenCL()
+      else: vseam = carver.findVerticalSeam()
+      afterFindSeam = time.time()
+      #print("Take %.6f seconds to find seam" % (afterFindSeam - before))
+
+      #2) Remove the seam
       carver.removeVerticalSeam(vseam)
-      afterRemoveSeam = int(time.time())
-      #print("Take %d seconds to remove seam" % (afterRemoveSeam - afterFindSeam))
+      afterRemoveSeam = time.time()
+      #print("Take %.6f seconds to remove seam" % (afterRemoveSeam - afterFindSeam))
+
+   end = time.time()
+   device = "GPU" if USE_OPENCL else "CPU"
+   print("Using %s : Take %.6f seconds to complete." % (device, end - begin))
 
    #save the final result
-   carver.dumpImg("out.jpg")
+   carver.dumpImg("out_%s.jpg" % device)
 
 if __name__ == "__main__":
    main(sys.argv)
