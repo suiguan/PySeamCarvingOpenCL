@@ -165,7 +165,7 @@ class SeamCarver:
          print("invalid seam length %d, height %d" % (len(vseam), self.height))
          return
       new_img_ar = np.array([np.delete(self.img_ar[y], vseam[y], axis=0) for y in range(0, self.height)])
-      self.reset(Image.fromarray(new_img_ar))
+      self.reset(Image.fromarray(new_img_ar.astype(dtype=np.uint8, copy=False)))
 
    #remove the given vertical seam index using OpenCL
    def removeVerticalSeamWithOpenCL(self, vseam):
@@ -177,7 +177,7 @@ class SeamCarver:
       res = cl.Buffer(self.cl_ctx, mf.WRITE_ONLY, new_img_ar.nbytes)
       self.cl_prog.removeVSeam(self.cl_queue, self.img_ar.shape, None, in_img, in_seams, res)
       cl.enqueue_copy(self.cl_queue, new_img_ar, res)
-      self.reset(Image.fromarray(new_img_ar.astype(np.uint8)))
+      self.reset(Image.fromarray(new_img_ar.astype(dtype=np.uint8, copy=False)))
 
    #save the img to a JPEG file
    def dumpImg(self, name):
