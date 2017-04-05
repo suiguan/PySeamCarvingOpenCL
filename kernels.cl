@@ -71,3 +71,23 @@ __kernel void cumulateEnergyAndPath(const int height, __global const int * in_en
       }
    }
 }
+
+__kernel void removeVSeam(__global const int * in_img, __global int * in_seams, __global int * res)
+{
+   int width = get_global_size(1);
+   int numPixels = get_global_size(2);
+   int hid = get_global_id(0);
+   int wid = get_global_id(1);
+   int rgb_idx = get_global_id(2);
+
+   if (wid >= width - 1) return;
+   if (wid >= in_seams[hid]) {
+      int target = (hid * (width-1) * numPixels) + (wid * numPixels) + rgb_idx; 
+      int source = (hid * width * numPixels) + ((wid+1) * numPixels) + rgb_idx; 
+      res[target] = in_img[source];
+   } else {
+      int target = (hid * (width-1) * numPixels) + (wid * numPixels) + rgb_idx; 
+      int source = (hid * width * numPixels) + (wid * numPixels) + rgb_idx; 
+      res[target] = in_img[source];
+   }
+}

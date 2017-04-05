@@ -44,8 +44,15 @@ class SeamCarver:
    def reset(self, img):
       self.img = img
       self.width, self.height = self.img.size
-      self.img_p = self.img.load()
+      self.img_ar = np.array(self.img, np.uint32)
       self.r_img, self.g_img, self.b_img = self.img.split()
+
+      #numpy array used by OpenCL:
+      self.r_ar = np.array(self.r_img, dtype=np.uint32)
+      self.g_ar = np.array(self.g_img, dtype=np.uint32)
+      self.b_ar = np.array(self.b_img, dtype=np.uint32)
+
+      #image array used by regular access:
       self.r = self.r_img.load()
       self.g = self.g_img.load()
       self.b = self.b_img.load()
@@ -82,13 +89,10 @@ class SeamCarver:
    #compute the energy map using OpenCL 
    def getEnergyMapWithCL(self):
       energy = np.zeros((self.height, self.width), dtype=np.uint32) 
-      r_ar = np.array(self.r_img, dtype=np.uint32)
-      g_ar = np.array(self.g_img, dtype=np.uint32)
-      b_ar = np.array(self.b_img, dtype=np.uint32)
       mf = cl.mem_flags
-      in_r = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=r_ar)
-      in_g = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=g_ar)
-      in_b = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=b_ar)
+      in_r = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=self.r_ar)
+      in_g = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=self.g_ar)
+      in_b = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=self.b_ar)
       res = cl.Buffer(self.cl_ctx, mf.WRITE_ONLY, energy.nbytes)
       self.cl_prog.dualGradientEnergy(self.cl_queue, energy.shape, None, in_r, in_g, in_b, res)
       cl.enqueue_copy(self.cl_queue, energy, res)
@@ -160,9 +164,20 @@ class SeamCarver:
       if len(vseam) != self.height:
          print("invalid seam length %d, height %d" % (len(vseam), self.height))
          return
-      img_ar = np.array(self.img)
-      new_img_ar = np.array([np.delete(img_ar[y], vseam[y], axis=0) for y in range(0, self.height)])
+      new_img_ar = np.array([np.delete(self.img_ar[y], vseam[y], axis=0) for y in range(0, self.height)])
       self.reset(Image.fromarray(new_img_ar))
+
+   #remove the given vertical seam index using OpenCL
+   def removeVerticalSeamWithOpenCL(self, vseam):
+      (h, w, n) = self.img_ar.shape
+      new_img_ar = np.zeros((h, w-1, n), dtype=np.uint32)
+      mf = cl.mem_flags
+      in_img = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=self.img_ar)
+      in_seams = cl.Buffer(self.cl_ctx, mf.READ_ONLY|mf.USE_HOST_PTR, hostbuf=np.array(vseam, np.uint32))
+      res = cl.Buffer(self.cl_ctx, mf.WRITE_ONLY, new_img_ar.nbytes)
+      self.cl_prog.removeVSeam(self.cl_queue, self.img_ar.shape, None, in_img, in_seams, res)
+      cl.enqueue_copy(self.cl_queue, new_img_ar, res)
+      self.reset(Image.fromarray(new_img_ar.astype(np.uint8)))
 
    #save the img to a JPEG file
    def dumpImg(self, name):
@@ -192,7 +207,6 @@ def main(argv):
    begin = time.time()
    for i in range(0, columns_to_remove): #for each width that needs to be removed 
       #1) Find the seam
-
       #print("iteration = %d, new_w = %d" % (i, new_w))
       before = time.time()
       if USE_OPENCL: vseam = carver.findVerticalSeamWithOpenCL()
@@ -201,7 +215,8 @@ def main(argv):
       #print("Take %.6f seconds to find seam" % (afterFindSeam - before))
 
       #2) Remove the seam
-      carver.removeVerticalSeam(vseam)
+      if USE_OPENCL: carver.removeVerticalSeamWithOpenCL(vseam)
+      else: carver.removeVerticalSeam(vseam)
       afterRemoveSeam = time.time()
       #print("Take %.6f seconds to remove seam" % (afterRemoveSeam - afterFindSeam))
 
